@@ -1,205 +1,346 @@
-import * as XLSX from 'xlsx'
-import { clamp01 } from './oee-calculator'
+import * as XLSX from "xlsx";
+import { clamp01 } from "./oee-calculator";
 
-export type PlantFormat = 'balok' | 'kristal'
+// ─── TIPE ─────────────────────────────────────────────────────────────────────
+export type PlantFormat = "balok" | "pakis" | "tuban" | "kristal";
 
 export interface DailyRowParsed {
-  tanggal:          string
-  es_keluar:        number
-  es_keluar_5kg?:   number
-  es_keluar_10kg?:  number
-  total_rusak:      number
-  bak1?:            number
-  bak2?:            number
-  bak3?:            number
-  rusak_p5k?:       number
-  rusak_p10k?:      number
-  rusak_kt?:        number
-  beban_normal?:    number
-  beban_puncak?:    number
-  total_beban?:     number
-  jumlah_mesin?:    number
-  prod_jam?:        number
-  kapasitas?:       number
-  es_tidak_terjual?:number
-  realisasi_order?: number
-  selisih_order?:   number
-  tenaga_kerja?:    number
-  output_tk?:       number
-  kwh_wbp?:         number
-  kwh_lwbp?:        number
-  availability:     number | null
-  performance:      number | null
-  quality:          number | null
-  oee:              number | null
+  tanggal: string;
+  es_keluar: number;
+  es_keluar_5kg?: number;
+  es_keluar_10kg?: number;
+  total_rusak: number;
+  bak1?: number;
+  bak2?: number;
+  bak3?: number;
+  bak3bb?: number;
+  bak3bk?: number;
+  bak4?: number;
+  bak5?: number;
+  rusak_p5k?: number;
+  rusak_p10k?: number;
+  rusak_kt?: number;
+  beban_normal?: number;
+  beban_puncak?: number;
+  total_beban?: number;
+  jumlah_mesin?: number;
+  prod_jam?: number;
+  kapasitas?: number;
+  es_tidak_terjual?: number;
+  realisasi_order?: number;
+  selisih_order?: number;
+  tenaga_kerja?: number;
+  output_tk?: number;
+  kwh_wbp?: number;
+  kwh_lwbp?: number;
+  kwh_total?: number;
+  downtime_jam?: number;
+  availability: number | null;
+  performance: number | null;
+  quality: number | null;
+  oee: number | null;
 }
 
 export interface ParseResult {
-  format:           PlantFormat
-  bulan:            string
-  rows:             DailyRowParsed[]
-  agg_availability: number | null
-  agg_performance:  number | null
-  agg_quality:      number | null
-  agg_oee:          number | null
-  total_es_keluar:  number
-  total_rusak:      number
-  row_count:        number
+  format: PlantFormat;
+  bulan: string;
+  rows: DailyRowParsed[];
+  agg_availability: number | null;
+  agg_performance: number | null;
+  agg_quality: number | null;
+  agg_oee: number | null;
+  total_es_keluar: number;
+  total_rusak: number;
+  row_count: number;
 }
 
-/* ─── HELPERS ─── */
+// ─── HELPERS ──────────────────────────────────────────────────────────────────
 function toNum(v: any): number | null {
-  if (v == null || v === '') return null
-  if (typeof v === 'string') {
-    if (v.startsWith('#') || v.toUpperCase() === 'TOTAL') return null
-    v = v.replace(/,/g, '').replace(/\s/g, '')
+  if (v == null || v === "") return null;
+  if (typeof v === "string") {
+    if (v.startsWith("#") || v.toUpperCase() === "TOTAL") return null;
+    v = v.replace(/,/g, "").replace(/\s/g, "");
   }
-  const n = parseFloat(String(v))
-  return isNaN(n) ? null : n
+  const n = parseFloat(String(v));
+  return isNaN(n) ? null : n;
 }
 
 function toDate(v: any): Date | null {
-  if (!v) return null
+  if (v == null || v === "") return null;
+
+  // ── instanceof Date (XLSX.js cellDates:true menghasilkan Date object) ──
+  // PENTING: Selalu gunakan LOCAL time (getFullYear/Month/Date), bukan getUTC*.
+  // Di browser UTC+7: Excel "2026-01-01 00:00 WIB" → Date internal = "2025-12-31T17:00Z"
+  // getUTCDate() = 31 (SALAH) | getDate() = 1 (BENAR karena local = WIB)
   if (v instanceof Date) {
-    if (isNaN(v.getTime())) return null
-    // Ambil komponen UTC untuk hindari timezone shift (server WIB = UTC+7)
-    return new Date(Date.UTC(v.getUTCFullYear(), v.getUTCMonth(), v.getUTCDate()))
+    if (isNaN(v.getTime())) return null;
+    return new Date(v.getFullYear(), v.getMonth(), v.getDate());
   }
-  // Excel serial number — parse lalu pakai Date.UTC
-  if (typeof v === 'number') {
-    const d = XLSX.SSF.parse_date_code(v)
-    if (d) return new Date(Date.UTC(d.y, d.m - 1, d.d))
-    return null
+
+  // ── Angka serial Excel (sheet_to_json tanpa cellDates) ──
+  if (typeof v === "number") {
+    if (v < 1000) return null;
+    const d = XLSX.SSF.parse_date_code(v);
+    if (!d) return null;
+    return new Date(d.y, d.m - 1, d.d);
   }
-  if (typeof v === 'string') {
-    const s = v.trim()
-    if (!s || s.startsWith('#')) return null
-    // ISO: 2026-01-01
-    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/)
-    if (iso) return new Date(Date.UTC(+iso[1], +iso[2] - 1, +iso[3]))
-    // DD/MM/YYYY atau D/M/YYYY
-    const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/)
-    if (dmy) {
-      const yr = dmy[3].length === 2 ? 2000 + +dmy[3] : +dmy[3]
-      return new Date(Date.UTC(yr, +dmy[2] - 1, +dmy[1]))
+
+  if (typeof v === "string") {
+    const s = v.trim();
+    if (!s || s.startsWith("#")) return null;
+
+    // ISO timestamp dengan T → misal "2025-12-31T17:00:00.000Z" (UTC string dari XLSX.js)
+    // Di UTC+7 string ini = 2026-01-01 → pakai getFullYear/Month/Date (local), BUKAN slice(0,10)
+    if (s.includes("T")) {
+      const d = new Date(s);
+      if (!isNaN(d.getTime()))
+        return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      return null;
     }
-    // M/D/YYYY (format US dari XLSX raw:false) e.g. "1/1/2026"
-    const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/)
-    if (mdy) return new Date(Date.UTC(+mdy[3], +mdy[1] - 1, +mdy[2]))
+
+    // YYYY-MM-DD tanpa waktu → aman dibaca sebagai local date langsung
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (iso) return new Date(+iso[1], +iso[2] - 1, +iso[3]);
+
+    const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+    if (dmy) return new Date(+dmy[3], +dmy[2] - 1, +dmy[1]);
+
+    const mdy = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+    if (mdy) return new Date(+mdy[3], +mdy[1] - 1, +mdy[2]);
+
+    const dmy_str = s.match(
+      /^(\d{1,2})\s+(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember|january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{2,4})$/i,
+    );
+    if (dmy_str) {
+      const monthMapID: Record<string, number> = {
+        januari: 1,
+        februari: 2,
+        maret: 3,
+        april: 4,
+        mei: 5,
+        juni: 6,
+        juli: 7,
+        agustus: 8,
+        september: 9,
+        oktober: 10,
+        november: 11,
+        desember: 12,
+      };
+      const monthMapEN: Record<string, number> = {
+        january: 1,
+        february: 2,
+        march: 3,
+        april: 4,
+        may: 5,
+        june: 6,
+        july: 7,
+        august: 8,
+        september: 9,
+        october: 10,
+        november: 11,
+        december: 12,
+      };
+      const mo =
+        monthMapID[dmy_str[2].toLowerCase()] ??
+        monthMapEN[dmy_str[2].toLowerCase()];
+      if (mo) {
+        let yr = +dmy_str[3];
+        if (yr < 100) yr += 2000;
+        return new Date(yr, mo - 1, +dmy_str[1]);
+      }
+    }
   }
-  return null
+
+  return null;
 }
 
 function isoDate(d: Date): string {
-  // Gunakan UTC methods agar tidak kena timezone shift
-  const y = d.getUTCFullYear()
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
-  const day = String(d.getUTCDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
 
-/* ─── DETECT FORMAT ─── */
+// ─── DETECT FORMAT ─────────────────────────────────────────────────────────────
 function detectFormat(raw: any[][]): PlantFormat {
-  const r1 = raw[1] ?? []   // header kolom (row 2)
-  const r2 = raw[2] ?? []   // sub-header (row 3)
+  const r1 = raw[1] ?? [];
+  const r2 = raw[2] ?? [];
 
-  const f5 = String(r1[5] ?? '').trim().toLowerCase()
-  const f6 = String(r1[6] ?? '').trim().toLowerCase()
-  const f7 = String(r1[7] ?? '').trim().toLowerCase()
+  const f5 = String(r1[5] ?? "")
+    .trim()
+    .toLowerCase();
+  const f6 = String(r1[6] ?? "")
+    .trim()
+    .toLowerCase();
+  const f7 = String(r1[7] ?? "")
+    .trim()
+    .toLowerCase();
+  const f8 = String(r1[8] ?? "")
+    .trim()
+    .toLowerCase();
+  const f9 = String(r1[9] ?? "")
+    .trim()
+    .toLowerCase();
+  const f10 = String(r1[10] ?? "")
+    .trim()
+    .toLowerCase();
+  const f11 = String(r1[11] ?? "")
+    .trim()
+    .toLowerCase();
+  const f12 = String(r1[12] ?? "")
+    .trim()
+    .toLowerCase();
 
-  // Cek row[1]
-  if (f5 === 'tgl') return 'kristal'
-  if (f6.includes('5kg') || f6.includes('5 kg')) return 'kristal'
-  if (f7.includes('10kg') || f7.includes('10 kg')) return 'kristal'
-  if (f5 === 'bulan' && f7.includes('bak')) return 'balok'
+  if (f5 === "tgl") return "kristal";
+  if (f6.includes("5kg") || f6.includes("5 kg")) return "kristal";
+  if (f7.includes("10kg") || f7.includes("10 kg")) return "kristal";
+  if (
+    String(r2[6] ?? "")
+      .trim()
+      .toLowerCase()
+      .includes("5kg")
+  )
+    return "kristal";
+  if (
+    String(r2[7] ?? "")
+      .trim()
+      .toLowerCase()
+      .includes("10kg")
+  )
+    return "kristal";
 
-  // Pembeda utama ada di row[2] sub-header:
-  // Kristal: col G = '5kg', col H = '10kg'
-  // Balok  : col H = 'Es Rusak Bak 1' atau sejenisnya
-  const s6 = String(r2[6] ?? '').trim().toLowerCase()
-  const s7 = String(r2[7] ?? '').trim().toLowerCase()
-  const s8 = String(r2[8] ?? '').trim().toLowerCase()
+  if (
+    f10.includes("bak 4") ||
+    f10.includes("bak 5") ||
+    f11.includes("bak 4") ||
+    f11.includes("bak 5") ||
+    f12.includes("bak 4") ||
+    f12.includes("bak 5")
+  )
+    return "tuban";
 
-  if (s6 === '5kg' || s6.includes('5 kg')) return 'kristal'
-  if (s7 === '10kg' || s7.includes('10 kg')) return 'kristal'
-  if (s6 === '5kg' && s7 === '10kg' && s8 === 'total') return 'kristal'
-
-  if (s6.includes('bak') || s7.includes('bak') || s8.includes('bak')) return 'balok'
-
-  // Default: balok
-  return 'balok'
-}
-
-
-/* ─── FORMAT A: BALOK ─── */
-function parseBalok(raw: any[][]): Omit<ParseResult, 'format'> {
-  // Struktur aktual:
-  // Row 0 (index 0): header umum
-  // Row 1 (index 1): header kolom — F=Bulan, G=EsKeluar, H=Bak1, I=Bak2, J=Bak3, K=TotalRusak,
-  //                  L=RealisasiOrder, M=BebanNormal, N=BebanPuncak, O=TotalBeban,
-  //                  P=JumlahMesin, Q=ProdJam, S=Kapasitas, T=EsTidakTerjual,
-  //                  U=PersenPenjualan, V=Order, W=Selisih, X=TK, Y=OutputTK
-  // Row 2 (index 2): sub-header + tanggal pertama di col[5]
-  // Row 3+ (index 3+): data harian — tanggal di col[5] (Date object)
-
-  // Ambil label bulan dari row index 2 col[5] (tanggal hari pertama bulan tsb)
-  let bulan = ''
-  const bulanRaw = raw[2]?.[5]
-  const bulanDate = toDate(bulanRaw)
-  if (bulanDate) {
-    bulan = bulanDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' })
-  } else if (bulanRaw) {
-    bulan = String(bulanRaw)
+  if (
+    f7.includes("bak 1") &&
+    f8.includes("bak 2") &&
+    f9.includes("total") &&
+    !f9.includes("bak")
+  ) {
+    return "pakis";
   }
 
-  const rows: DailyRowParsed[] = []
+  return "balok";
+}
 
+// ─── KALKULASI OEE HARIAN (Balok & Tuban) ────────────────────────────────────
+function calcDailyBalok(
+  esKeluar: number,
+  totalRusak: number,
+  totalBeban: number,
+  jumlahMesin: number,
+  prodJam: number,
+): {
+  availability: number | null;
+  performance: number | null;
+  quality: number | null;
+  oee: number | null;
+} {
+  const availability =
+    totalBeban > 0 && jumlahMesin > 0
+      ? clamp01(totalBeban / (jumlahMesin * 24))
+      : null;
+  const performance =
+    totalBeban > 0 && prodJam > 0
+      ? clamp01(esKeluar / (totalBeban * prodJam))
+      : null;
+  const quality =
+    esKeluar > 0 ? clamp01((esKeluar - totalRusak) / esKeluar) : null;
+  const oee =
+    availability != null && performance != null && quality != null
+      ? availability * performance * quality
+      : null;
+  return { availability, performance, quality, oee };
+}
+
+// ─── KALKULASI OEE HARIAN (Pakis) ────────────────────────────────────────────
+const PAKIS_PPT_JAM = 23;
+const KAPASITAS_PAKIS_OEE_DEFAULT = 3680;
+
+function calcDailyPakis(
+  esKeluar: number,
+  totalRusak: number,
+  totalBeban: number,
+  jumlahMesin: number,
+  kapasitas: number,
+): {
+  availability: number | null;
+  performance: number | null;
+  quality: number | null;
+  oee: number | null;
+} {
+  const availability =
+    totalBeban > 0 && jumlahMesin > 0
+      ? clamp01(totalBeban / (jumlahMesin * PAKIS_PPT_JAM))
+      : null;
+  const performance = kapasitas > 0 ? clamp01(esKeluar / kapasitas) : null;
+  const quality =
+    esKeluar > 0 ? clamp01((esKeluar - totalRusak) / esKeluar) : null;
+  const oee =
+    availability != null && performance != null && quality != null
+      ? availability * performance * quality
+      : null;
+  return { availability, performance, quality, oee };
+}
+
+// ─── FORMAT A: BALOK ──────────────────────────────────────────────────────────
+function parseBalok(raw: any[][]): Omit<ParseResult, "format"> {
+  const bulanDate = toDate(raw[2]?.[5]);
+  const bulan = bulanDate
+    ? bulanDate.toLocaleDateString("id-ID", {
+        month: "long",
+        year: "numeric",
+        timeZone: "Asia/Jakarta",
+      })
+    : String(raw[2]?.[5] ?? "");
+
+  const rows: DailyRowParsed[] = [];
   for (let i = 3; i < raw.length; i++) {
-    const r = raw[i] ?? []
+    const r = raw[i] ?? [];
+    const dv = r[5];
+    if (!dv) continue;
+    if (
+      String(dv)
+        .toUpperCase()
+        .match(/TOTAL|WARNA|KUNING/)
+    )
+      break;
+    const date = toDate(dv);
+    if (!date) continue;
 
-    // Tanggal ada di col[5] (kolom F)
-    const dateVal = r[5]
-    if (!dateVal) continue
+    const esKeluar = toNum(r[6]) ?? 0;
+    const bak1 = toNum(r[7]) ?? 0;
+    const bak2 = toNum(r[8]) ?? 0;
+    const bak3 = toNum(r[9]) ?? 0;
+    const totalRusak = toNum(r[10]) ?? bak1 + bak2 + bak3;
+    const realisasi = toNum(r[11]) ?? 0;
+    const bebanNormal = toNum(r[12]) ?? 0;
+    const bebanPuncak = toNum(r[13]) ?? 0;
+    const totalBeban = toNum(r[14]) ?? bebanNormal + bebanPuncak;
+    const jumlahMesin = toNum(r[15]) ?? 2;
+    const prodJam = toNum(r[16]) ?? 0;
+    const kapasitas = toNum(r[18]) ?? 3896;
+    const esTidak = toNum(r[19]) ?? Math.max(0, kapasitas - esKeluar);
+    const selisih = toNum(r[22]) ?? 0;
+    const tk = toNum(r[23]) ?? 0;
+    const outputTK = toNum(r[24]) ?? 0;
 
-    // Stop di baris TOTAL atau WARNA
-    const dateStr = String(dateVal).toUpperCase()
-    if (dateStr.includes('TOTAL') || dateStr.includes('WARNA') || dateStr.includes('KUNING')) break
-
-    const date = toDate(dateVal)
-    if (!date) continue
-
-    // Kolom sesuai mapping aktual file
-    const esKeluar    = toNum(r[6])  ?? 0          // G: Es Keluar
-    const bak1        = toNum(r[7])  ?? 0          // H: Rusak Bak 1
-    const bak2        = toNum(r[8])  ?? 0          // I: Rusak Bak 2
-    const bak3        = toNum(r[9])  ?? 0          // J: Rusak Bak 3
-    const totalRusak  = toNum(r[10]) ?? (bak1 + bak2 + bak3)  // K: Total Rusak
-    const realisasi   = toNum(r[11]) ?? 0          // L: Realisasi Order
-    const bebanNormal = toNum(r[12]) ?? 0          // M: Beban Normal
-    const bebanPuncak = toNum(r[13]) ?? 0          // N: Beban Puncak
-    const totalBeban  = toNum(r[14]) ?? (bebanNormal + bebanPuncak)  // O: Total Beban
-    const jumlahMesin = toNum(r[15]) ?? 2          // P: Jumlah Mesin
-    const prodJam     = toNum(r[16]) ?? 0          // Q: Prod/Jam
-    const kapasitas   = toNum(r[18]) ?? 3896       // S: Kapasitas
-    const esTidak     = toNum(r[19]) ?? Math.max(0, kapasitas - esKeluar)  // T: Es Tidak Terjual
-    const order       = toNum(r[21]) ?? 0          // V: Order
-    const selisih     = toNum(r[22]) ?? 0          // W: Selisih Order
-    const tk          = toNum(r[23]) ?? 0          // X: Tenaga Kerja
-    const outputTK    = toNum(r[24]) ?? 0          // Y: Output TK
-
-    const availability = totalBeban > 0 && jumlahMesin > 0
-      ? clamp01(totalBeban / (jumlahMesin * 24)) : null
-    const performance  = totalBeban > 0 && prodJam > 0
-      ? clamp01(esKeluar / (totalBeban * prodJam)) : null
-    const quality      = esKeluar > 0
-      ? clamp01((esKeluar - totalRusak) / esKeluar) : null
-    const oee          = availability != null && performance != null && quality != null
-      ? availability * performance * quality : null
+    if (esKeluar === 0 && totalBeban === 0 && jumlahMesin === 0) continue;
 
     rows.push({
       tanggal: isoDate(date),
       es_keluar: esKeluar,
-      bak1, bak2, bak3,
+      bak1,
+      bak2,
+      bak3,
       total_rusak: totalRusak,
       realisasi_order: realisasi,
       beban_normal: bebanNormal,
@@ -212,278 +353,675 @@ function parseBalok(raw: any[][]): Omit<ParseResult, 'format'> {
       selisih_order: selisih,
       tenaga_kerja: tk,
       output_tk: outputTK,
-      availability, performance, quality, oee,
-    })
+      ...calcDailyBalok(esKeluar, totalRusak, totalBeban, jumlahMesin, prodJam),
+    });
   }
 
-  // Deduplikasi — jika ada tanggal sama dalam file, ambil yang terakhir
-  const dedupMap = new Map<string, DailyRowParsed>()
-  for (const row of rows) dedupMap.set(row.tanggal, row)
-  const dedupedRows = Array.from(dedupMap.values()).sort((a, b) => a.tanggal.localeCompare(b.tanggal))
-
-  // Aggregate OEE — formula sesuai sheet Effectiveness:
-  // Availability = (capacity - rasio_beban_normal) / capacity
-  //   dimana rasio_beban_normal = total_beban_normal / total_beban
-  // Performance  = avg_achiev / capacity
-  //   dimana avg_achiev = total_es_keluar / n_hari
-  // Quality      = (total_es_keluar - total_rusak) / total_es_keluar
-  // capacity disimpan saat parseKonsolSheet menerima rawEffectiveness
-  // Untuk sekarang hitung tanpa capacity — akan di-override di parseKonsolSheet
-  const n = dedupedRows.length
-  let aggAvail: number | null = null, aggPerf: number | null = null
-  let aggQual: number | null = null,  aggOEE: number | null = null
-
-  if (n > 0) {
-    const totalProd    = dedupedRows.reduce((s, r) => s + r.es_keluar, 0)
-    const totalRusak2  = dedupedRows.reduce((s, r) => s + r.total_rusak, 0)
-    const totalBeban   = dedupedRows.reduce((s, r) => s + (r.total_beban   ?? 0), 0)
-    const totalBN      = dedupedRows.reduce((s, r) => s + (r.beban_normal  ?? 0), 0)
-
-    // Quality selalu bisa dihitung tanpa capacity
-    if (totalProd > 0) {
-      aggQual = clamp01((totalProd - totalRusak2) / totalProd)
-    }
-    // Availability & Performance butuh capacity — akan di-override dari Effectiveness sheet
-    // Simpan nilai sementara untuk fallback jika sheet Effectiveness tidak ada
-    if (totalBeban > 0 && totalProd > 0) {
-      const rasioBeban = totalBeban > 0 ? totalBN / totalBeban : 0
-      // Fallback: gunakan kapasitas kolom S (per baris pertama)
-      const kapFallback = dedupedRows[0]?.kapasitas ?? 3896
-      aggAvail = clamp01((kapFallback - rasioBeban) / kapFallback)
-      const avgAchiev = totalProd / n
-      aggPerf  = clamp01(avgAchiev / kapFallback)
-      aggOEE   = aggAvail * aggPerf * (aggQual ?? 1)
-    }
-  }
-
+  const dedup = deduplicateRows(rows);
   return {
-    bulan, rows: dedupedRows,
-    agg_availability: aggAvail, agg_performance: aggPerf,
-    agg_quality: aggQual, agg_oee: aggOEE,
-    total_es_keluar: dedupedRows.reduce((s, r) => s + r.es_keluar, 0),
-    total_rusak:     dedupedRows.reduce((s, r) => s + r.total_rusak, 0),
-    row_count:       dedupedRows.length,
-  }
+    bulan,
+    rows: dedup,
+    agg_availability: null,
+    agg_performance: null,
+    agg_quality: null,
+    agg_oee: null,
+    total_es_keluar: dedup.reduce((s, r) => s + r.es_keluar, 0),
+    total_rusak: dedup.reduce((s, r) => s + r.total_rusak, 0),
+    row_count: dedup.length,
+  };
 }
 
-/* ─── FORMAT B: KRISTAL ─── */
-function parseKristal(raw: any[][]): Omit<ParseResult, 'format'> {
-  // Struktur aktual Konsol Kristal:
-  // Row 0 (index 0): header umum
-  // Row 1 (index 1): header kolom — F=Bulan, G=Es Keluar, J=Retur, M=Realisasi, P=Mesin, X=Listrik
-  // Row 2 (index 2): sub-header + F=tanggal bulan, G=5kg, H=10kg, I=Total, J=5kg retur, K=10kg retur, L=Total retur
-  //                  M=5kg realisasi, N=10kg realisasi, O=Total real, P=Prod/Jam, Q=Kapasitas, R=EsTidakTerjual
-  //                  X=kWh WBP, Y=kWh LWBP
-  // Row 3+ (index 3+): data harian — F=tanggal, G=es5kg, H=es10kg, I=total_es, J=retur5, K=retur10, L=total_retur
-  //                    M=real5, N=real10, O=total_real, P=prod_jam, Q=kapasitas, X=kwh_wbp, Y=kwh_lwbp
-  // BARIS TOTAL: F='TOTAL'
+// ─── FORMAT B: PAKIS ──────────────────────────────────────────────────────────
+function parsePakis(
+  raw: any[][],
+  kapasitasOEE?: number,
+): Omit<ParseResult, "format"> {
+  const bulanDate = toDate(raw[2]?.[5]);
+  const bulan = bulanDate
+    ? bulanDate.toLocaleDateString("id-ID", {
+        month: "long",
+        year: "numeric",
+        timeZone: "Asia/Jakarta",
+      })
+    : String(raw[2]?.[5] ?? "");
 
-  let bulan = ''
-  const bulanRaw = raw[2]?.[5]   // sub-header row, col F = tanggal bulan
-  const bulanDate = toDate(bulanRaw)
-  if (bulanDate) {
-    bulan = bulanDate.toLocaleDateString('id-ID', { month: 'long', year: 'numeric' })
-  } else if (raw[1]?.[5]) {
-    bulan = String(raw[1][5])
-  }
+  const kapOEE =
+    kapasitasOEE && kapasitasOEE > 0
+      ? kapasitasOEE
+      : KAPASITAS_PAKIS_OEE_DEFAULT;
 
-  const rows: DailyRowParsed[] = []
+  const rows: DailyRowParsed[] = [];
   for (let i = 3; i < raw.length; i++) {
-    const r = raw[i] ?? []
+    const r = raw[i] ?? [];
+    const dv = r[5];
+    if (!dv) continue;
+    if (
+      String(dv)
+        .toUpperCase()
+        .match(/TOTAL|WARNA|KUNING/)
+    )
+      break;
+    const date = toDate(dv);
+    if (!date) continue;
 
-    // Stop di baris TOTAL atau WARNA
-    const f5 = String(r[5] ?? '').toUpperCase()
-    if (f5.includes('TOTAL') || f5.includes('WARNA')) break
+    const esKeluar = toNum(r[6]) ?? 0;
+    const bak1 = toNum(r[7]) ?? 0;
+    const bak2 = toNum(r[8]) ?? 0;
+    const totalRusak = toNum(r[9]) ?? bak1 + bak2;
+    const realisasi = toNum(r[10]) ?? 0;
+    const bebanNormal = toNum(r[11]) ?? 0;
+    const bebanPuncak = toNum(r[12]) ?? 0;
+    const totalBeban = toNum(r[13]) ?? bebanNormal + bebanPuncak;
+    const jumlahMesin = toNum(r[14]) ?? 2;
+    const prodJam = toNum(r[15]) ?? 0;
+    const kapasitas = toNum(r[17]) ?? 4806;
+    const esTidak = toNum(r[18]) ?? Math.max(0, kapasitas - esKeluar);
+    const selisih = toNum(r[21]) ?? 0;
+    const tk = toNum(r[22]) ?? 0;
+    const outputTK = toNum(r[23]) ?? 0;
 
-    const date = r[5] instanceof Date ? r[5] : toDate(r[5])
-    if (!date) continue
-
-    const es5kg      = toNum(r[6])  ?? 0   // G: Es Keluar 5kg
-    const es10kg     = toNum(r[7])  ?? 0   // H: Es Keluar 10kg
-    const esKeluar   = toNum(r[8])  ?? (es5kg + es10kg)  // I: Total Es Keluar
-    const retur5     = toNum(r[9])  ?? 0   // J: Retur 5kg
-    const retur10    = toNum(r[10]) ?? 0   // K: Retur 10kg
-    const totalRetur = toNum(r[11]) ?? (retur5 + retur10) // L: Total Retur
-    const real5      = toNum(r[12]) ?? 0   // M: Realisasi 5kg
-    const real10     = toNum(r[13]) ?? 0   // N: Realisasi 10kg
-    const totalReal  = toNum(r[14]) ?? (real5 + real10)  // O: Total Realisasi
-    const prodJam    = toNum(r[15]) ?? 0   // P: Produktivitas Mesin/Jam (kg)
-    const kapasitas  = toNum(r[16]) ?? 0   // Q: Kapasitas Produksi
-    const esTidak    = toNum(r[17]) ?? 0   // R: Es Tidak Terjual
-    const order5     = toNum(r[19]) ?? 0   // T: Order 5kg
-    const order10    = toNum(r[20]) ?? 0   // U: Order 10kg
-    const totalOrder = toNum(r[21]) ?? (order5 + order10) // V: Total Order
-    const selisih    = toNum(r[22]) ?? 0   // W: Selisih Order
-    const kwhWBP     = toNum(r[23]) ?? 0   // X: kWh WBP
-    const kwhLWBP    = toNum(r[24]) ?? 0   // Y: kWh LWBP
+    if (esKeluar === 0 && totalBeban === 0 && jumlahMesin === 0) continue;
 
     rows.push({
-      tanggal:          isoDate(date),
-      es_keluar:        esKeluar,
-      es_keluar_5kg:    es5kg,
-      es_keluar_10kg:   es10kg,
-      total_rusak:      totalRetur,
-      rusak_p5k:        retur5,
-      rusak_p10k:       retur10,
-      rusak_kt:         0,
-      realisasi_order:  totalReal,
-      selisih_order:    selisih,
-      prod_jam:         prodJam,
-      kapasitas:        kapasitas,
+      tanggal: isoDate(date),
+      es_keluar: esKeluar,
+      bak1,
+      bak2,
+      total_rusak: totalRusak,
+      realisasi_order: realisasi,
+      beban_normal: bebanNormal,
+      beban_puncak: bebanPuncak,
+      total_beban: totalBeban,
+      jumlah_mesin: jumlahMesin,
+      prod_jam: prodJam,
+      kapasitas,
       es_tidak_terjual: esTidak,
-      kwh_wbp:          kwhWBP,
-      kwh_lwbp:         kwhLWBP,
-      availability: null, performance: null, quality: null, oee: null,
-    })
+      selisih_order: selisih,
+      tenaga_kerja: tk,
+      output_tk: outputTK,
+      ...calcDailyPakis(esKeluar, totalRusak, totalBeban, jumlahMesin, kapOEE),
+    });
   }
 
-  // Deduplikasi
-  const dedupMap = new Map<string, DailyRowParsed>()
-  for (const row of rows) dedupMap.set(row.tanggal, row)
-  const dedupedRows = Array.from(dedupMap.values()).sort((a, b) => a.tanggal.localeCompare(b.tanggal))
-
-  // Aggregate OEE — akan di-override dari Effectiveness sheet di parseKonsolSheet
-  // Hitung fallback dari data Konsol
-  const n          = dedupedRows.length
-  let aggAvail: number | null = null
-  let aggPerf:  number | null = null
-  let aggQual:  number | null = null
-  let aggOEE:   number | null = null
-
-  if (n > 0) {
-    const totalEs    = dedupedRows.reduce((s, r) => s + r.es_keluar,   0)
-    const totalRusak = dedupedRows.reduce((s, r) => s + r.total_rusak, 0)
-    if (totalEs > 0) aggQual = clamp01((totalEs - totalRusak) / totalEs)
-    // Avail & Perf di-override dari Effectiveness — default null jika tidak ada
-  }
-
+  const dedup = deduplicateRows(rows);
   return {
-    bulan, rows: dedupedRows,
-    agg_availability: aggAvail, agg_performance: aggPerf,
-    agg_quality: aggQual, agg_oee: aggOEE,
-    total_es_keluar: dedupedRows.reduce((s, r) => s + r.es_keluar,   0),
-    total_rusak:     dedupedRows.reduce((s, r) => s + r.total_rusak, 0),
-    row_count:       dedupedRows.length,
-  }
+    bulan,
+    rows: dedup,
+    agg_availability: null,
+    agg_performance: null,
+    agg_quality: null,
+    agg_oee: null,
+    total_es_keluar: dedup.reduce((s, r) => s + r.es_keluar, 0),
+    total_rusak: dedup.reduce((s, r) => s + r.total_rusak, 0),
+    row_count: dedup.length,
+  };
 }
 
-/* ─── BACA SHEET EFFECTIVENESS ─── */
-function parseEffectiveness(rawEff: any[][]): {
-  availability: number | null, performance: number | null,
-  quality: number | null, oee: number | null,
-  capacity: number | null, k23: number | null
-} {
-  // raw:false → nilai bisa berupa string angka, pakai toNum() untuk konversi
-  // G10=Availability, K10=Performance, O10=Quality, O23=OEE, G23=Capacity, K23=RasioBN/nilai khusus
-  const avail    = toNum(rawEff[9]?.[6])    // G10
-  const perf     = toNum(rawEff[9]?.[10])   // K10 (bisa #REF! → null)
-  const qual     = toNum(rawEff[9]?.[14])   // O10 (bisa #REF! → null)
-  const oee      = toNum(rawEff[22]?.[14])  // O23 (bisa #REF! → null)
-  const capacity = toNum(rawEff[22]?.[6])   // G23
-  const k23      = toNum(rawEff[22]?.[10])  // K23 — Balok=rasio_bn, Kristal=nilai langsung
-  console.log(`[parseEffectiveness] avail=${avail} perf=${perf} qual=${qual} oee=${oee} capacity=${capacity} k23=${k23}`)
-  return { availability: avail, performance: perf, quality: qual, oee, capacity, k23 }
-}
+// ─── FORMAT C: TUBAN ──────────────────────────────────────────────────────────
+//
+// MAPPING KOLOM (TERVERIFIKASI dari 01_Jan_26_OEE_PMP_PLANT_PMP_TUBAN_.xlsx):
+//
+//   [0]  kosong
+//   [1]  TGL angka (1-28 saja; baris 29-31 KOSONG di kolom ini!)
+//   [2]  Penjualan
+//   [3]  Kekurangan Target
+//   [4]  Kekurangan Per Hari  ("#REF!")
+//   [5]  TANGGAL (datetime)   ← dateCol = 5, SELALU ADA untuk semua 31 baris
+//   [6]  Es Keluar
+//   [7]  Es Rusak Bak 1
+//   [8]  Es Rusak Bak 2
+//   [9]  Es Rusak Bak 3 BB
+//   [10] Es Rusak Bak 3 BK
+//   [11] Es Rusak Bak 4
+//   [12] Es Rusak Bak 5
+//   [13] Total Es Rusak
+//   [14] % Kerusakan          ← skip
+//   [15] Realisasi Order
+//   [16] Beban Normal
+//   [17] Beban Puncak
+//   [18] Total Beban
+//   [19] Jumlah Mesin
+//   [20] Prod/Jam (bersih)
+//   [21] Prod/Jam KOTOR        ← skip
+//   [22] Kapasitas Produksi
+//   [23] Es Tidak Terjual
+//   [24] % Penjualan           ← skip
+//   [25] Order                 ← skip
+//   [26] Selisih Order
+//   [27] Tenaga Kerja
+//   [28] Output Tenaga Kerja
+//
+// BUG LAMA: Kode sebelumnya memakai offset dinamis (dateCol=4 atau 5) dan
+//   membaca data via r[c(5)]..r[c(28)] dengan c=(base)=>base+offset.
+//   Akibatnya ketika dateCol=4, semua kolom data bergeser -1 sehingga
+//   Bak1 terbaca dari kolom Bak2, dsb. Dan karena kolom TGL angka [1]
+//   kosong untuk baris 29-31, baris-baris itu terlewat.
+//
+// FIX: dateCol di-hardcode ke 5 (terverifikasi), semua indeks kolom data
+//   langsung (tanpa offset). Baris 29-31 kini terbaca karena kondisi
+//   skip hanya memeriksa kolom [5] (TANGGAL), bukan kolom [1] (TGL angka).
+//
+function parseTuban(raw: any[][]): Omit<ParseResult, "format"> {
+  const dateCol = 5; // fixed, verified from actual file
 
-/* ─── MAIN EXPORT ─── */
-export function parseKonsolSheet(raw: any[][], rawEffectiveness?: any[][]): ParseResult {
-  if (!raw || raw.length < 4) throw new Error("Sheet 'Konsol' kosong atau terlalu pendek.")
-  const format = detectFormat(raw)
+  console.log(`[Tuban] dateCol=${dateCol} (fixed)`);
 
-  const result = format === 'kristal' ? parseKristal(raw) : parseBalok(raw)
-
-  // Override agg_ dari sheet Effectiveness (berlaku untuk Balok & Kristal)
-  if (rawEffectiveness && rawEffectiveness.length >= 23) {
-    const eff = parseEffectiveness(rawEffectiveness)
-
-    if (eff.capacity && eff.capacity > 0 && result.rows.length > 0) {
-      const rows       = result.rows
-      const n          = rows.length
-      const totalProd  = rows.reduce((s, r) => s + r.es_keluar,   0)
-      const totalRusak = rows.reduce((s, r) => s + r.total_rusak, 0)
-
-      // Performance = avg_achiev / capacity (sama untuk Balok & Kristal)
-      const avgAchiev = n > 0 ? totalProd / n : 0
-      const aggPerf   = clamp01(avgAchiev / eff.capacity)
-
-      // Quality = (total_es - total_rusak) / total_es (sama untuk Balok & Kristal)
-      const aggQual = totalProd > 0 ? clamp01((totalProd - totalRusak) / totalProd) : null
-
-      let aggAvail: number | null = null
-
-      if (format === 'balok') {
-        // Balok: Availability = (capacity - rasio_beban_normal) / capacity
-        // rasio_beban_normal = total_beban_normal / total_beban (dihitung dari Konsol)
-        const totalBeban = rows.reduce((s, r) => s + (r.total_beban  ?? 0), 0)
-        const totalBN    = rows.reduce((s, r) => s + (r.beban_normal ?? 0), 0)
-        const rasioBeban = totalBeban > 0 ? totalBN / totalBeban : 0
-        aggAvail = clamp01((eff.capacity - rasioBeban) / eff.capacity)
-      } else {
-        // Kristal: Availability = (capacity - K23) / capacity
-        // K23 adalah nilai rasio yang sudah dihitung di sheet Effectiveness
-        if (eff.k23 != null && eff.capacity > 0) {
-          aggAvail = clamp01((eff.capacity - eff.k23) / eff.capacity)
-        } else if (eff.availability != null && eff.availability > 0 && eff.availability <= 1) {
-          // Fallback: ambil G10 langsung jika K23 tidak valid
-          aggAvail = eff.availability
-        }
-      }
-
-      const aggOEE = aggAvail != null && aggQual != null ? aggAvail * aggPerf * aggQual : null
-
-      result.agg_availability = aggAvail
-      result.agg_performance  = aggPerf
-      result.agg_quality      = aggQual
-      result.agg_oee          = aggOEE
-
-      console.log(`[OEE Calc] format=${format} avail=${aggAvail?.toFixed(4)} perf=${aggPerf?.toFixed(4)} qual=${aggQual?.toFixed(4)} oee=${aggOEE?.toFixed(4)}`)
-    } else {
-      // Fallback: pakai nilai langsung dari sel Effectiveness
-      const valid = (v: number | null) => v != null && v >= 0 && v <= 1
-      if (valid(eff.availability)) result.agg_availability = eff.availability
-      if (valid(eff.performance))  result.agg_performance  = eff.performance
-      if (valid(eff.quality))      result.agg_quality      = eff.quality
-      if (valid(eff.oee))          result.agg_oee          = eff.oee
+  let bulan = "";
+  for (let i = 3; i < Math.min(raw.length, 40); i++) {
+    const d = toDate(raw[i]?.[dateCol]);
+    if (d) {
+      bulan = d.toLocaleDateString("id-ID", {
+        month: "long",
+        year: "numeric",
+        timeZone: "Asia/Jakarta",
+      });
+      break;
     }
   }
 
-  return { format, ...result }
+  const rows: DailyRowParsed[] = [];
+  for (let i = 3; i < raw.length; i++) {
+    const r = raw[i] ?? [];
+
+    const dv = r[dateCol];
+    if (dv == null) continue;
+    const dvStr = String(dv).toUpperCase().trim();
+    if (dvStr.match(/TOTAL|WARNA|KUNING/)) break;
+    const date = toDate(dv);
+    if (!date) continue;
+
+    const esKeluar = toNum(r[6]) ?? 0;
+    const bak1 = toNum(r[7]) ?? 0;
+    const bak2 = toNum(r[8]) ?? 0;
+    const bak3bb = toNum(r[9]) ?? 0;
+    const bak3bk = toNum(r[10]) ?? 0;
+    const bak3 = bak3bb + bak3bk;
+    const bak4 = toNum(r[11]) ?? 0;
+    const bak5 = toNum(r[12]) ?? 0;
+    const totalRusak = toNum(r[13]) ?? bak1 + bak2 + bak3 + bak4 + bak5;
+    // r[14] = % Kerusakan → skip
+    const realisasi = toNum(r[15]) ?? 0;
+    const bebanNormal = toNum(r[16]) ?? 0;
+    const bebanPuncak = toNum(r[17]) ?? 0;
+    const totalBeban = toNum(r[18]) ?? bebanNormal + bebanPuncak;
+    const jumlahMesin = toNum(r[19]) ?? 3;
+    const prodJam = toNum(r[20]) ?? 0;
+    // r[21] = Prod/Jam KOTOR → skip
+    const kapasitas = toNum(r[22]) ?? 12426;
+    const esTidak = toNum(r[23]) ?? Math.max(0, kapasitas - esKeluar);
+    // r[24] = % Penjualan → skip
+    // r[25] = Order       → skip
+    const selisih = toNum(r[26]) ?? 0;
+    const tk = toNum(r[27]) ?? 0;
+    const outputTK = toNum(r[28]) ?? 0;
+
+    if (esKeluar === 0 && totalBeban === 0) continue;
+
+    rows.push({
+      tanggal: isoDate(date),
+      es_keluar: esKeluar,
+      bak1,
+      bak2,
+      bak3,
+      bak3bb,
+      bak3bk,
+      bak4,
+      bak5,
+      total_rusak: totalRusak,
+      realisasi_order: realisasi,
+      beban_normal: bebanNormal,
+      beban_puncak: bebanPuncak,
+      total_beban: totalBeban,
+      jumlah_mesin: jumlahMesin,
+      prod_jam: prodJam,
+      kapasitas,
+      es_tidak_terjual: esTidak,
+      selisih_order: selisih,
+      tenaga_kerja: tk,
+      output_tk: outputTK,
+      ...calcDailyBalok(esKeluar, totalRusak, totalBeban, jumlahMesin, prodJam),
+    });
+  }
+
+  const dedup = deduplicateRows(rows);
+  return {
+    bulan,
+    rows: dedup,
+    agg_availability: null,
+    agg_performance: null,
+    agg_quality: null,
+    agg_oee: null,
+    total_es_keluar: dedup.reduce((s, r) => s + r.es_keluar, 0),
+    total_rusak: dedup.reduce((s, r) => s + r.total_rusak, 0),
+    row_count: dedup.length,
+  };
+}
+
+// ─── FORMAT D: KRISTAL LAMA ────────────────────────────────────────────────
+function parseKristal(raw: any[][]): Omit<ParseResult, "format"> {
+  const bulanDate = toDate(raw[2]?.[5]);
+  const bulan = bulanDate
+    ? bulanDate.toLocaleDateString("id-ID", {
+        month: "long",
+        year: "numeric",
+        timeZone: "Asia/Jakarta",
+      })
+    : String(raw[1]?.[5] ?? "");
+
+  const rows: DailyRowParsed[] = [];
+  for (let i = 3; i < raw.length; i++) {
+    const r = raw[i] ?? [];
+    if (
+      String(r[5] ?? "")
+        .toUpperCase()
+        .match(/TOTAL|WARNA/)
+    )
+      break;
+    const date = r[5] instanceof Date ? r[5] : toDate(r[5]);
+    if (!date) continue;
+
+    const es5kg = toNum(r[6]) ?? 0;
+    const es10kg = toNum(r[7]) ?? 0;
+    const esKeluar = toNum(r[8]) ?? es5kg + es10kg;
+    const retur5 = toNum(r[9]) ?? 0;
+    const retur10 = toNum(r[10]) ?? 0;
+    const totalRetur = toNum(r[11]) ?? retur5 + retur10;
+    const real5 = toNum(r[12]) ?? 0;
+    const real10 = toNum(r[13]) ?? 0;
+    const totalReal = toNum(r[14]) ?? real5 + real10;
+    const prodJam = toNum(r[15]) ?? 0;
+    const kapasitas = toNum(r[16]) ?? 0;
+    const esTidak = toNum(r[17]) ?? 0;
+    const selisih = toNum(r[22]) ?? 0;
+    const kwhWBP = toNum(r[23]) ?? 0;
+    const kwhLWBP = toNum(r[24]) ?? 0;
+
+    rows.push({
+      tanggal: isoDate(date),
+      es_keluar: esKeluar,
+      es_keluar_5kg: es5kg,
+      es_keluar_10kg: es10kg,
+      total_rusak: totalRetur,
+      rusak_p5k: retur5,
+      rusak_p10k: retur10,
+      rusak_kt: 0,
+      realisasi_order: totalReal,
+      selisih_order: selisih,
+      prod_jam: prodJam,
+      kapasitas,
+      es_tidak_terjual: esTidak,
+      kwh_wbp: kwhWBP,
+      kwh_lwbp: kwhLWBP,
+      availability: null,
+      performance: null,
+      quality: null,
+      oee: null,
+    });
+  }
+
+  const dedup = deduplicateRows(rows);
+  const totalEs = dedup.reduce((s, r) => s + r.es_keluar, 0);
+  const totalRsak = dedup.reduce((s, r) => s + r.total_rusak, 0);
+  const aggQual = totalEs > 0 ? clamp01((totalEs - totalRsak) / totalEs) : null;
+  return {
+    bulan,
+    rows: dedup,
+    agg_availability: null,
+    agg_performance: null,
+    agg_quality: aggQual,
+    agg_oee: null,
+    total_es_keluar: totalEs,
+    total_rusak: totalRsak,
+    row_count: dedup.length,
+  };
+}
+
+// ─── FORMAT KRISTAL BARU ──────────────────────────────────────────────────────
+export function parseKristalNew(
+  rawData: any[][],
+  rawRingkasan?: any[][],
+): Omit<ParseResult, "format"> {
+  let bulan = "";
+  const judul = String(rawData[0]?.[0] ?? "");
+  const m = judul.match(
+    /(januari|februari|maret|april|mei|juni|juli|agustus|september|oktober|november|desember)\s+(\d{4})/i,
+  );
+  if (m)
+    bulan =
+      m[1].charAt(0).toUpperCase() + m[1].slice(1).toLowerCase() + " " + m[2];
+
+  const rows: DailyRowParsed[] = [];
+  for (let i = 4; i < rawData.length; i++) {
+    const r = rawData[i] ?? [];
+    const date = toDate(r[0]);
+    if (!date) continue;
+
+    const es5kg = toNum(r[1]) ?? 0;
+    const es10kg = toNum(r[2]) ?? 0;
+    const totalEs = toNum(r[3]) ?? es5kg * 0.5 + es10kg;
+    const retur5 = toNum(r[4]) ?? 0;
+    const retur10 = toNum(r[5]) ?? 0;
+    const totalRetur = toNum(r[6]) ?? retur5 * 0.5 + retur10;
+    const totalReal = toNum(r[9]) ?? 0;
+    const prodJam = toNum(r[10]) ?? 0;
+    const kapasitas = toNum(r[11]) ?? 0;
+    const esTidak = toNum(r[12]) ?? 0;
+    const selisih = toNum(r[17]) ?? 0;
+    const kwhWBP = toNum(r[18]) ?? 0;
+    const kwhLWBP = toNum(r[19]) ?? 0;
+    const kwhTotal = toNum(r[20]) ?? kwhWBP + kwhLWBP;
+    const downtime = toNum(r[21]) ?? 0;
+    const avail = toNum(r[22]);
+    const perf = toNum(r[23]);
+    const qual = toNum(r[24]);
+    const oee = toNum(r[25]);
+
+    rows.push({
+      tanggal: isoDate(date),
+      es_keluar: totalEs,
+      es_keluar_5kg: es5kg,
+      es_keluar_10kg: es10kg,
+      total_rusak: totalRetur,
+      rusak_p5k: retur5,
+      rusak_p10k: retur10,
+      rusak_kt: 0,
+      realisasi_order: totalReal,
+      selisih_order: selisih,
+      prod_jam: prodJam,
+      kapasitas,
+      es_tidak_terjual: esTidak,
+      kwh_wbp: kwhWBP,
+      kwh_lwbp: kwhLWBP,
+      kwh_total: kwhTotal,
+      downtime_jam: downtime,
+      availability: avail,
+      performance: perf,
+      quality: qual,
+      oee,
+    });
+  }
+
+  const dedup = deduplicateRows(rows);
+  let aggAvail: number | null = null,
+    aggPerf: number | null = null,
+    aggQual: number | null = null,
+    aggOEE: number | null = null;
+  if (rawRingkasan) {
+    aggAvail = toNum(rawRingkasan[13]?.[1]);
+    aggPerf = toNum(rawRingkasan[16]?.[1]);
+    aggQual = toNum(rawRingkasan[19]?.[1]);
+    aggOEE = toNum(rawRingkasan[22]?.[1]);
+  }
+
+  return {
+    bulan,
+    rows: dedup,
+    agg_availability: aggAvail,
+    agg_performance: aggPerf,
+    agg_quality: aggQual,
+    agg_oee: aggOEE,
+    total_es_keluar: dedup.reduce((s, r) => s + r.es_keluar, 0),
+    total_rusak: dedup.reduce((s, r) => s + r.total_rusak, 0),
+    row_count: dedup.length,
+  };
+}
+
+// ─── BACA SHEET OEE / EFFECTIVENESS ──────────────────────────────────────────
+function parseOEESheet(rawEff: any[][]): {
+  availability: number | null;
+  performance: number | null;
+  quality: number | null;
+  oee: number | null;
+  capacity: number | null;
+  rasio_bn: number | null;
+} {
+  let availCol = -1,
+    perfCol = -1,
+    qualCol = -1;
+
+  for (let ri = 0; ri < Math.min(rawEff.length, 10); ri++) {
+    const r = rawEff[ri] ?? [];
+    for (let ci = 0; ci < r.length; ci++) {
+      const v = String(r[ci] ?? "")
+        .toLowerCase()
+        .trim();
+      if (v.startsWith("avail")) {
+        availCol = ci;
+        for (let cj = ci + 1; cj < r.length; cj++) {
+          const vj = String(r[cj] ?? "")
+            .toLowerCase()
+            .trim();
+          if (vj.startsWith("perf") && perfCol === -1) perfCol = cj;
+          if (vj.startsWith("qual") && qualCol === -1) qualCol = cj;
+        }
+        break;
+      }
+    }
+    if (availCol !== -1) break;
+  }
+
+  if (availCol === -1) availCol = 6;
+  if (perfCol === -1) perfCol = availCol + 4;
+  if (qualCol === -1) qualCol = availCol + 8;
+
+  let valRow = -1;
+  for (let ri = 4; ri < Math.min(rawEff.length, 16); ri++) {
+    const v = toNum(rawEff[ri]?.[availCol]);
+    if (v !== null && v >= 0 && v <= 1) {
+      valRow = ri;
+      break;
+    }
+  }
+  if (valRow === -1) valRow = 9;
+
+  let sumRow = -1;
+  for (let ri = valRow + 4; ri < Math.min(rawEff.length, 30); ri++) {
+    const v = toNum(rawEff[ri]?.[availCol]);
+    if (v !== null && v > 1) {
+      sumRow = ri;
+      break;
+    }
+  }
+  if (sumRow === -1) sumRow = valRow + 13;
+
+  const avail = toNum(rawEff[valRow]?.[availCol]);
+  const perf = toNum(rawEff[valRow]?.[perfCol]);
+  const qual = toNum(rawEff[valRow]?.[qualCol]);
+  const oee = toNum(rawEff[sumRow]?.[qualCol]);
+  const capacity = toNum(rawEff[sumRow]?.[availCol]);
+  const rasio_bn = toNum(rawEff[sumRow]?.[perfCol]);
+
+  console.log(
+    `[OEESheet] cols=${availCol},${perfCol},${qualCol} rows=${valRow},${sumRow} ` +
+      `avail=${avail?.toFixed(6)} perf=${perf?.toFixed(6)} qual=${qual?.toFixed(6)} ` +
+      `oee=${oee?.toFixed(6)} cap=${capacity} rasio_bn=${rasio_bn?.toFixed(6)}`,
+  );
+  return {
+    availability: avail,
+    performance: perf,
+    quality: qual,
+    oee,
+    capacity,
+    rasio_bn,
+  };
+}
+
+// ─── DEDUPLICATE ROWS ─────────────────────────────────────────────────────────
+function deduplicateRows(rows: DailyRowParsed[]): DailyRowParsed[] {
+  const m = new Map<string, DailyRowParsed>();
+  for (const r of rows) m.set(r.tanggal, r);
+  return Array.from(m.values()).sort((a, b) =>
+    a.tanggal.localeCompare(b.tanggal),
+  );
+}
+
+// ─── MAIN EXPORT ──────────────────────────────────────────────────────────────
+export function parseKonsolSheet(
+  raw: any[][],
+  rawEffectiveness?: any[][],
+): ParseResult {
+  if (!raw || raw.length < 4)
+    throw new Error("Sheet 'Konsol' kosong atau terlalu pendek.");
+
+  const format = detectFormat(raw);
+
+  let pakisKapasitasOEE: number | undefined;
+  if (format === "pakis" && rawEffectiveness && rawEffectiveness.length >= 5) {
+    const effPakis = parseOEESheet(rawEffectiveness);
+    if (effPakis.capacity && effPakis.capacity > 0)
+      pakisKapasitasOEE = effPakis.capacity;
+  }
+
+  const result =
+    format === "kristal"
+      ? parseKristal(raw)
+      : format === "pakis"
+        ? parsePakis(raw, pakisKapasitasOEE)
+        : format === "tuban"
+          ? parseTuban(raw)
+          : parseBalok(raw);
+
+  if (rawEffectiveness && rawEffectiveness.length >= 5) {
+    const eff = parseOEESheet(rawEffectiveness);
+    const valid = (v: number | null) => v != null && v >= 0 && v <= 1;
+
+    if (format === "balok" || format === "tuban") {
+      if (
+        valid(eff.availability) &&
+        valid(eff.performance) &&
+        valid(eff.quality)
+      ) {
+        result.agg_availability = eff.availability;
+        result.agg_performance = eff.performance;
+        result.agg_quality = eff.quality;
+        result.agg_oee =
+          eff.oee && valid(eff.oee)
+            ? eff.oee
+            : eff.availability! * eff.performance! * eff.quality!;
+      } else if (eff.capacity && eff.capacity > 0 && result.rows.length > 0) {
+        const rows = result.rows.filter((r) => r.es_keluar > 0);
+        const n = rows.length;
+        if (n > 0) {
+          const tp = rows.reduce((s, r) => s + r.es_keluar, 0);
+          const tr = rows.reduce((s, r) => s + r.total_rusak, 0);
+          const tb = rows.reduce((s, r) => s + (r.total_beban ?? 0), 0);
+          const tbn = rows.reduce((s, r) => s + (r.beban_normal ?? 0), 0);
+          const avail = clamp01(
+            (eff.capacity - (tb > 0 ? tbn / tb : 0)) / eff.capacity,
+          );
+          const perf = clamp01(tp / n / eff.capacity);
+          const qual = tp > 0 ? clamp01((tp - tr) / tp) : null;
+          result.agg_availability = avail;
+          result.agg_performance = perf;
+          result.agg_quality = qual;
+          result.agg_oee = qual != null ? avail * perf * qual : null;
+        }
+      }
+    } else if (format === "pakis") {
+      if (
+        valid(eff.availability) &&
+        valid(eff.performance) &&
+        valid(eff.quality)
+      ) {
+        result.agg_availability = eff.availability;
+        result.agg_performance = eff.performance;
+        result.agg_quality = eff.quality;
+        result.agg_oee =
+          eff.oee && valid(eff.oee)
+            ? eff.oee
+            : eff.availability! * eff.performance! * eff.quality!;
+      } else {
+        const rows = result.rows.filter((r) => r.es_keluar > 0);
+        const n = rows.length;
+        if (n > 0 && eff.capacity && eff.capacity > 0) {
+          const tp = rows.reduce((s, r) => s + r.es_keluar, 0);
+          const tr = rows.reduce((s, r) => s + r.total_rusak, 0);
+          const aggAvail = 1.0;
+          const aggPerf = clamp01(tp / n / eff.capacity);
+          const aggQual = tp > 0 ? clamp01((tp - tr) / tp) : null;
+          result.agg_availability = aggAvail;
+          result.agg_performance = aggPerf;
+          result.agg_quality = aggQual;
+          result.agg_oee =
+            aggQual != null ? aggAvail * aggPerf * aggQual : null;
+        }
+      }
+    } else {
+      if (
+        valid(eff.availability) &&
+        valid(eff.performance) &&
+        valid(eff.quality)
+      ) {
+        result.agg_availability = eff.availability;
+        result.agg_performance = eff.performance;
+        result.agg_quality = eff.quality;
+        result.agg_oee =
+          eff.oee && valid(eff.oee)
+            ? eff.oee
+            : eff.availability! * eff.performance! * eff.quality!;
+      } else if (eff.capacity && eff.capacity > 0) {
+        const rows = result.rows,
+          n = rows.length;
+        const tp = rows.reduce((s, r) => s + r.es_keluar, 0);
+        const tr = rows.reduce((s, r) => s + r.total_rusak, 0);
+        const perf = clamp01((n > 0 ? tp / n : 0) / eff.capacity);
+        const qual = tp > 0 ? clamp01((tp - tr) / tp) : null;
+        let avail: number | null = null;
+        if (valid(eff.rasio_bn))
+          avail = clamp01((eff.capacity! - eff.rasio_bn!) / eff.capacity!);
+        else if (valid(eff.availability)) avail = eff.availability;
+        result.agg_availability = avail;
+        result.agg_performance = perf;
+        result.agg_quality = qual;
+        result.agg_oee =
+          avail != null && qual != null ? avail * perf * qual : null;
+      }
+    }
+  }
+
+  return { format, ...result };
 }
 
 export function toDbRecords(result: ParseResult, unitId: number): object[] {
-  return result.rows.map(row => ({
+  return result.rows.map((row) => ({
     unit_id: unitId,
     tanggal: row.tanggal,
     es_keluar: row.es_keluar,
-    es_keluar_5kg:    row.es_keluar_5kg    ?? null,
-    es_keluar_10kg:   row.es_keluar_10kg   ?? null,
-    bak1:             row.bak1             ?? null,
-    bak2:             row.bak2             ?? null,
-    bak3:             row.bak3             ?? null,
-    total_rusak:      row.total_rusak,
-    rusak_p5k:        row.rusak_p5k        ?? null,
-    rusak_p10k:       row.rusak_p10k       ?? null,
-    rusak_kt:         row.rusak_kt         ?? null,
-    beban_normal:     row.beban_normal     ?? null,
-    beban_puncak:     row.beban_puncak     ?? null,
-    total_beban:      row.total_beban      ?? null,
-    jumlah_mesin:     row.jumlah_mesin     ?? null,
-    prod_jam:         row.prod_jam         ?? null,
-    kapasitas:        row.kapasitas        ?? null,
+    es_keluar_5kg: row.es_keluar_5kg ?? null,
+    es_keluar_10kg: row.es_keluar_10kg ?? null,
+    bak1: row.bak1 ?? null,
+    bak2: row.bak2 ?? null,
+    bak3: row.bak3 ?? null,
+    bak3bb: row.bak3bb ?? null,
+    bak3bk: row.bak3bk ?? null,
+    bak4: row.bak4 ?? null,
+    bak5: row.bak5 ?? null,
+    total_rusak: row.total_rusak,
+    rusak_p5k: row.rusak_p5k ?? null,
+    rusak_p10k: row.rusak_p10k ?? null,
+    rusak_kt: row.rusak_kt ?? null,
+    beban_normal: row.beban_normal ?? null,
+    beban_puncak: row.beban_puncak ?? null,
+    total_beban: row.total_beban ?? null,
+    jumlah_mesin: row.jumlah_mesin ?? null,
+    prod_jam: row.prod_jam ?? null,
+    kapasitas: row.kapasitas ?? null,
     es_tidak_terjual: row.es_tidak_terjual ?? null,
-    realisasi_order:  row.realisasi_order  ?? null,
-    selisih_order:    row.selisih_order    ?? null,
-    tenaga_kerja:     row.tenaga_kerja     ?? null,
-    output_tk:        row.output_tk        ?? null,
-    kwh_wbp:          row.kwh_wbp          ?? null,
-    kwh_lwbp:         row.kwh_lwbp         ?? null,
-    availability:     row.availability,
-    performance:      row.performance,
-    quality:          row.quality,
-    oee:              row.oee,
+    realisasi_order: row.realisasi_order ?? null,
+    selisih_order: row.selisih_order ?? null,
+    tenaga_kerja: row.tenaga_kerja ?? null,
+    output_tk: row.output_tk ?? null,
+    kwh_wbp: row.kwh_wbp ?? null,
+    kwh_lwbp: row.kwh_lwbp ?? null,
+    kwh_total: row.kwh_total ?? null,
+    downtime_jam: row.downtime_jam ?? null,
+    availability: row.availability,
+    performance: row.performance,
+    quality: row.quality,
+    oee: row.oee,
     agg_availability: result.agg_availability,
-    agg_performance:  result.agg_performance,
-    agg_quality:      result.agg_quality,
-    agg_oee:          result.agg_oee,
-  }))
+    agg_performance: result.agg_performance,
+    agg_quality: result.agg_quality,
+    agg_oee: result.agg_oee,
+  }));
 }
